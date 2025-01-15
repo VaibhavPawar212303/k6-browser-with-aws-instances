@@ -110,8 +110,8 @@ jobs:
               --output text)
             echo "Connecting to instance: $INSTANCE_IP"
             ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP 
-              sudo apt-get update -y
-              sudo apt-get install -y k6 git
+              sudo apt-get update 
+              sudo apt-get install k6 git
               git clone https://github.com/VaibhavPawar212303/k6-browser-with-aws-instances.git
               echo "K6 and repository setup completed on \$(hostname)"
           done
