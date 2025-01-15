@@ -1,4 +1,4 @@
-name: K6 Test on AWS EC2
+name: K6 Test on AWS EC2 with Ubuntu
 
 on:
   push:
@@ -10,9 +10,9 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      REGION: us-east-1              
-      INSTANCE_TYPE: t2.micro       
-      K6_SCRIPT: script.js          
+      REGION: us-east-1
+      INSTANCE_TYPE: t2.micro
+      K6_SCRIPT: script.js
       TAG_NAME: k6-test-instance
 
     steps:
@@ -26,12 +26,12 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.REGION }}
 
-    - name: Get Latest Amazon Linux AMI
+    - name: Get Latest Ubuntu AMI
       id: get_ami
       run: |
         AMI_ID=$(aws ec2 describe-images \
-          --owners amazon \
-          --filters "Name=name,Values=amzn2-ami-hvm-2.0.*-x86_64-gp2" \
+          --owners 099720109477 \
+          --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*" \
           --query 'Images | sort_by(@, &CreationDate)[-1].ImageId' \
           --output text)
         echo "AMI_ID=${AMI_ID}" >> $GITHUB_ENV
@@ -64,17 +64,17 @@ jobs:
     - name: Prepare User Data
       id: prepare_userdata
       run: |
-        # Generate the base64-encoded user data script
-        USER_DATA=$(cat << EOF
+        USER_DATA=$(cat << 'EOF'
         #!/bin/bash
-        sudo yum update -y
-        sudo yum install -y docker
+        sudo apt update -y
+        sudo apt install -y docker.io
         sudo systemctl start docker
-        echo "${{ github.workspace }}/scripts/${{ env.K6_SCRIPT }}" > /home/ec2-user/script.js
-        sudo docker run -v /home/ec2-user:/scripts --rm grafana/k6 run /scripts/script.js
+        mkdir -p /home/ubuntu/scripts
+        echo "console.log('Hello from K6!');" > /home/ubuntu/scripts/script.js
+        sudo docker run -v /home/ubuntu/scripts:/scripts --rm grafana/k6 run /scripts/script.js
         EOF
         )
-        echo "USER_DATA=${USER_DATA}" >> $GITHUB_ENV
+        echo "USER_DATA=$(echo "$USER_DATA" | base64 -w 0)" >> $GITHUB_ENV
 
     - name: Launch EC2 Instance
       id: launch_ec2
@@ -86,7 +86,7 @@ jobs:
           --security-group-ids ${{ env.SECURITY_GROUP }} \
           --subnet-id ${{ env.SUBNET_ID }} \
           --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ env.TAG_NAME }}}]" \
-          --user-data "$(echo ${{ env.USER_DATA }} | base64)" \
+          --user-data "$(echo ${{ env.USER_DATA }} | base64 --decode)" \
           --query 'Instances[0].InstanceId' \
           --output text)
         echo "INSTANCE_ID=${INSTANCE_ID}" >> $GITHUB_ENV
