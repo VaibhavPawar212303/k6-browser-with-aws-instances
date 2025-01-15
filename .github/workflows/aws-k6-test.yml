@@ -125,7 +125,7 @@ jobs:
               dir 
               cd scripts
               dir 
-              k6 run script.js
+              K6_BROWSER_HEADLESS=false k6 run script.js
               echo "K6 and repository setup completed on \$(hostname)"
           EOF
           done
