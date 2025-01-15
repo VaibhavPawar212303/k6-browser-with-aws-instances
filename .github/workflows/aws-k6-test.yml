@@ -103,6 +103,7 @@ jobs:
             --instance-type ${{ env.INSTANCE_TYPE }} \
             --security-group-ids ${{ env.SECURITY_GROUP }} \
             --subnet-id ${{ env.SUBNET_ID }} \
+             --key-name vaibhav \
             --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ env.TAG_NAME }}}]" \
             --user-data "$(echo ${{ env.USER_DATA }} | base64 --decode)" \
             --query 'Instances[0].InstanceId' --output text)
