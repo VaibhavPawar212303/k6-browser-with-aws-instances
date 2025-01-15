@@ -87,7 +87,6 @@ jobs:
           --subnet-id ${{ env.SUBNET_ID }} \
           --key-name vaibhav \  # Use the key pair name here
           --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ env.TAG_NAME }}}]" \
-          --user-data "$(echo ${{ env.USER_DATA }} | base64 --decode)" \
           --query 'Instances[0].InstanceId' \
           --output text)
         echo "INSTANCE_ID=${INSTANCE_ID}" >> $GITHUB_ENV
