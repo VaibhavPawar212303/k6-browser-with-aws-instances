@@ -74,75 +74,54 @@ jobs:
           fi
           echo "SUBNET_ID=${SUBNET_ID}" >> $GITHUB_ENV
 
-      - name: Prepare User Data
-        id: prepare_userdata
-        run: |
-          SCRIPT_PATH="./scripts/${{ env.K6_SCRIPT }}"
-          if [[ ! -f "$SCRIPT_PATH" ]]; then
-            echo "K6 script not found. Using default script."
-            echo "console.log('Default script executed');" > "$SCRIPT_PATH"
-          fi
-          USER_DATA=$(cat << 'EOF'
-          #!/bin/bash
-          sudo apt update -y
-          sudo apt install -y docker.io
-          sudo systemctl start docker
-          mkdir -p /home/ubuntu/scripts
-          echo "console.log('Hello from K6!');" > /home/ubuntu/scripts/script.js
-          sudo docker run -v /home/ubuntu/scripts:/scripts --rm grafana/k6 run /scripts/script.js
-          EOF
-          )
-          echo "USER_DATA=$(echo "$USER_DATA" | base64 -w 0)" >> $GITHUB_ENV
-
-      - name: Launch EC2 Instance
+      - name: Launch 5 EC2 Instances
         id: launch_ec2
         run: |
-          INSTANCE_ID=$(aws ec2 run-instances \
+          INSTANCE_IDS=$(aws ec2 run-instances \
             --image-id ${{ env.AMI_ID }} \
-            --count 1 \
+            --count 5 \
             --instance-type ${{ env.INSTANCE_TYPE }} \
             --security-group-ids ${{ env.SECURITY_GROUP }} \
             --subnet-id ${{ env.SUBNET_ID }} \
-             --key-name vaibhav \
+            --key-name vaibhav \
             --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ env.TAG_NAME }}}]" \
-            --user-data "$(echo ${{ env.USER_DATA }} | base64 --decode)" \
-            --query 'Instances[0].InstanceId' --output text)
-          if [[ -z "$INSTANCE_ID" || "$INSTANCE_ID" == "None" ]]; then
-            echo "Failed to launch EC2 instance." >&2
+            --query 'Instances[*].InstanceId' --output text)
+          if [[ -z "$INSTANCE_IDS" ]]; then
+            echo "Failed to launch EC2 instances." >&2
             exit 1
           fi
-          echo "INSTANCE_ID=${INSTANCE_ID}" >> $GITHUB_ENV
+          echo "INSTANCE_IDS=${INSTANCE_IDS}" >> $GITHUB_ENV
 
-      - name: Wait for Instance to Complete Execution
+      - name: Wait for Instances to Be Ready
         run: |
-          aws ec2 wait instance-status-ok --instance-ids ${{ env.INSTANCE_ID }}
+          for INSTANCE_ID in ${{ env.INSTANCE_IDS }}; do
+            aws ec2 wait instance-status-ok --instance-ids $INSTANCE_ID
+          done
 
-      - name: Get EC2 Public IP
-        id: get_ip
+      - name: Get EC2 Public IPs
+        id: get_ips
         run: |
-          INSTANCE_IP=$(aws ec2 describe-instances \
-            --instance-ids ${{ env.INSTANCE_ID }} \
-            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          INSTANCE_IPS=$(aws ec2 describe-instances \
+            --instance-ids ${{ env.INSTANCE_IDS }} \
+            --query 'Reservations[*].Instances[*].PublicIpAddress' \
             --output text)
-          echo "INSTANCE_IP=${INSTANCE_IP}" >> $GITHUB_ENV
+          echo "INSTANCE_IPS=${INSTANCE_IPS}" >> $GITHUB_ENV
 
-      - name: Run K6 Script on EC2 Instance
+      - name: Run Commands on EC2 Instances
         run: |
-          # Save the private key to a file
           echo "$AWS_SSH_PRIVATE_KEY" > private_key.pem
           chmod 600 private_key.pem
-
-          # SSH into the instance and run the K6 script
-          ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@${{ env.INSTANCE_IP }} \
-          "ls -la"
+          for INSTANCE_IP in ${{ env.INSTANCE_IPS }}; do
+            ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "ls -la"
+          done
         env:
           AWS_SSH_PRIVATE_KEY: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
 
-      - name: Terminate EC2 Instance
+      - name: Terminate EC2 Instances
         if: always()
         run: |
-          aws ec2 terminate-instances --instance-ids ${{ env.INSTANCE_ID }}
-          aws ec2 wait instance-terminated --instance-ids ${{ env.INSTANCE_ID }}
+          aws ec2 terminate-instances --instance-ids ${{ env.INSTANCE_IDS }}
+          aws ec2 wait instance-terminated --instance-ids ${{ env.INSTANCE_IDS }}
 
       - name: Delete Security Group
         if: always()
