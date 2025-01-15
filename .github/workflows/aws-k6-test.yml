@@ -12,7 +12,9 @@ jobs:
     env:
       REGION: us-east-1
       INSTANCE_TYPE: t2.micro
-      TAG_NAME: k6-test-instance
+      MASTER_TAG_NAME: k6-master-instance
+      SLAVE_TAG_NAME: k6-slave-instance
+      SG_NAME: k6-test-sg
 
     steps:
       - name: Checkout code
@@ -39,25 +41,22 @@ jobs:
           fi
           echo "AMI_ID=${AMI_ID}" >> $GITHUB_ENV
 
-      - name: Create Security Group
+      - name: Create or Fetch Security Group
         id: create_security_group
         run: |
-          SG_NAME="k6-test-sg"
-          EXISTING_SG_ID=$(aws ec2 describe-security-groups \
-            --filters "Name=group-name,Values=${SG_NAME}" \
+          SG_ID=$(aws ec2 describe-security-groups \
+            --filters "Name=group-name,Values=${{ env.SG_NAME }}" \
             --query "SecurityGroups[0].GroupId" --output text 2>/dev/null)
-          
-          if [[ "$EXISTING_SG_ID" == "None" || -z "$EXISTING_SG_ID" ]]; then
+
+          if [[ "$SG_ID" == "None" || -z "$SG_ID" ]]; then
             echo "Creating a new security group..."
             SG_ID=$(aws ec2 create-security-group \
-              --group-name "$SG_NAME" \
+              --group-name "${{ env.SG_NAME }}" \
               --description "Security group for K6 test" \
               --vpc-id $(aws ec2 describe-vpcs --query 'Vpcs[0].VpcId' --output text) \
               --query 'GroupId' --output text)
             aws ec2 authorize-security-group-ingress \
               --group-id "$SG_ID" --protocol tcp --port 22 --cidr 0.0.0.0/0
-          else
-            SG_ID="$EXISTING_SG_ID"
           fi
           echo "SECURITY_GROUP=${SG_ID}" >> $GITHUB_ENV
 
@@ -73,70 +72,79 @@ jobs:
           fi
           echo "SUBNET_ID=${SUBNET_ID}" >> $GITHUB_ENV
 
-      - name: Launch EC2 Instances
-        id: launch_ec2
+      - name: Launch Master Instance (if not exists)
+        id: launch_master
         run: |
-          INSTANCE_IDS=$(aws ec2 run-instances \
+          MASTER_INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${{ env.MASTER_TAG_NAME }}" \
+            --query 'Reservations[*].Instances[?State.Name == `running`].InstanceId' --output text)
+
+          if [[ -z "$MASTER_INSTANCE_ID" || "$MASTER_INSTANCE_ID" == "None" ]]; then
+            echo "Creating Master instance..."
+            MASTER_INSTANCE_ID=$(aws ec2 run-instances \
+              --image-id ${{ env.AMI_ID }} \
+              --count 1 \
+              --instance-type ${{ env.INSTANCE_TYPE }} \
+              --security-group-ids ${{ env.SECURITY_GROUP }} \
+              --subnet-id ${{ env.SUBNET_ID }} \
+              --key-name vaibhav \
+              --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ env.MASTER_TAG_NAME }}}]" \
+              --query 'Instances[0].InstanceId' --output text)
+          fi
+          echo "MASTER_INSTANCE_ID=${MASTER_INSTANCE_ID}" >> $GITHUB_ENV
+
+      - name: Launch Slave Instance
+        id: launch_slave
+        run: |
+          SLAVE_INSTANCE_ID=$(aws ec2 run-instances \
             --image-id ${{ env.AMI_ID }} \
             --count 1 \
             --instance-type ${{ env.INSTANCE_TYPE }} \
             --security-group-ids ${{ env.SECURITY_GROUP }} \
             --subnet-id ${{ env.SUBNET_ID }} \
             --key-name vaibhav \
-            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ env.TAG_NAME }}}]" \
-            --query 'Instances[*].InstanceId' --output text)
-          if [[ -z "$INSTANCE_IDS" || "$INSTANCE_IDS" == "None" ]]; then
-            echo "Failed to launch EC2 instances." >&2
-            exit 1
-          fi
-          echo "INSTANCE_IDS=${INSTANCE_IDS}" >> $GITHUB_ENV
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ env.SLAVE_TAG_NAME }}}]" \
+            --query 'Instances[0].InstanceId' --output text)
+          echo "SLAVE_INSTANCE_ID=${SLAVE_INSTANCE_ID}" >> $GITHUB_ENV
 
       - name: Wait for Instances to Complete Initialization
         run: |
-          for id in ${{ env.INSTANCE_IDS }}; do
+          for id in ${{ env.MASTER_INSTANCE_ID }} ${{ env.SLAVE_INSTANCE_ID }}; do
             aws ec2 wait instance-status-ok --instance-ids $id
           done
 
-      - name: Execute Commands via SSH
+      - name: Execute Commands via SSH on Slave
         run: |
-          # Save the private key to a file
           echo "$AWS_SSH_PRIVATE_KEY" > private_key.pem
           chmod 600 private_key.pem
 
-          for id in ${{ env.INSTANCE_IDS }}; do
-            INSTANCE_IP=$(aws ec2 describe-instances \
-              --instance-ids $id \
-              --query 'Reservations[0].Instances[0].PublicIpAddress' \
-              --output text)
-            echo "Connecting to instance: $INSTANCE_IP"
-            ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP << 'EOF'
-              sudo apt-get update
-              sudo apt-get install -y gpg
-              sudo gpg -k
-              sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
-              echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
-              sudo apt-get update
-              sudo apt-get install -y k6
-              k6 --version
-              git clone https://github.com/VaibhavPawar212303/k6-browser-with-aws-instances.git
-              sudo apt-get install chromium-browser
-              dir 
-              cd k6-browser-with-aws-instances
-              dir 
-              cd scripts
-              dir 
-              K6_BROWSER_HEADLESS=false k6 run script.js
-              echo "K6 and repository setup completed on \$(hostname)"
+          SLAVE_IP=$(aws ec2 describe-instances \
+            --instance-ids ${{ env.SLAVE_INSTANCE_ID }} \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+          echo "Connecting to Slave instance: $SLAVE_IP"
+          ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$SLAVE_IP << 'EOF'
+            # Commands to set up and execute K6 on Slave
+            sudo apt-get update
+            sudo apt-get install -y gpg
+            sudo gpg -k
+            sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+            echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+            sudo apt-get update
+            sudo apt-get install -y k6
+            k6 --version
+            git clone https://github.com/VaibhavPawar212303/k6-browser-with-aws-instances.git
+            sudo apt-get install chromium-browser
+            cd k6-browser-with-aws-instances/scripts
+            K6_BROWSER_HEADLESS=false k6 run script.js
           EOF
-          done
         env:
           AWS_SSH_PRIVATE_KEY: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
 
-      - name: Terminate EC2 Instances
+      - name: Terminate Instances
         if: always()
         run: |
-          aws ec2 terminate-instances --instance-ids ${{ env.INSTANCE_IDS }}
-          aws ec2 wait instance-terminated --instance-ids ${{ env.INSTANCE_IDS }}
+          aws ec2 terminate-instances --instance-ids ${{ env.SLAVE_INSTANCE_ID }}
+          aws ec2 wait instance-terminated --instance-ids ${{ env.SLAVE_INSTANCE_ID }}
 
       - name: Delete Security Group
         if: always()
