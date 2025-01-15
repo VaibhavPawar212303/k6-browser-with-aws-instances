@@ -15,11 +15,9 @@ jobs:
       TAG_NAME: k6-test-instance
 
     steps:
-      # Checkout repository code
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # Set up AWS CLI credentials
       - name: Set up AWS CLI
         uses: aws-actions/configure-aws-credentials@v3
         with:
@@ -27,7 +25,6 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.REGION }}
 
-      # Get the latest Ubuntu AMI ID
       - name: Get Latest Ubuntu AMI
         id: get_ami
         run: |
@@ -42,7 +39,6 @@ jobs:
           fi
           echo "AMI_ID=${AMI_ID}" >> $GITHUB_ENV
 
-      # Create or retrieve security group
       - name: Create Security Group
         id: create_security_group
         run: |
@@ -50,7 +46,7 @@ jobs:
           EXISTING_SG_ID=$(aws ec2 describe-security-groups \
             --filters "Name=group-name,Values=${SG_NAME}" \
             --query "SecurityGroups[0].GroupId" --output text 2>/dev/null)
-
+          
           if [[ "$EXISTING_SG_ID" == "None" || -z "$EXISTING_SG_ID" ]]; then
             echo "Creating a new security group..."
             SG_ID=$(aws ec2 create-security-group \
@@ -65,7 +61,6 @@ jobs:
           fi
           echo "SECURITY_GROUP=${SG_ID}" >> $GITHUB_ENV
 
-      # Fetch default subnet ID
       - name: Get Default Subnet
         id: get_subnet
         run: |
@@ -78,7 +73,6 @@ jobs:
           fi
           echo "SUBNET_ID=${SUBNET_ID}" >> $GITHUB_ENV
 
-      # Launch EC2 instance
       - name: Launch EC2 Instances
         id: launch_ec2
         run: |
@@ -97,16 +91,15 @@ jobs:
           fi
           echo "INSTANCE_IDS=${INSTANCE_IDS}" >> $GITHUB_ENV
 
-      # Wait for instances to initialize
       - name: Wait for Instances to Complete Initialization
         run: |
           for id in ${{ env.INSTANCE_IDS }}; do
             aws ec2 wait instance-status-ok --instance-ids $id
           done
 
-      # Execute commands on the instance via SSH
       - name: Execute Commands via SSH
         run: |
+          # Save the private key to a file
           echo "$AWS_SSH_PRIVATE_KEY" > private_key.pem
           chmod 600 private_key.pem
 
@@ -118,22 +111,27 @@ jobs:
             echo "Connecting to instance: $INSTANCE_IP"
             ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP << 'EOF'
               sudo apt-get update
-              sudo apt-get install -y k6 git
+              sudo apt-get install -y gpg
+              sudo gpg -k
+              sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+              echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+              sudo apt-get update
+              sudo apt-get install -y k6
+              k6 --version
               git clone https://github.com/VaibhavPawar212303/k6-browser-with-aws-instances.git
-              echo "K6 and repository setup completed on $(hostname)"
+              dir 
+              echo "K6 and repository setup completed on \$(hostname)"
           EOF
           done
         env:
           AWS_SSH_PRIVATE_KEY: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
 
-      # Terminate EC2 instances
       - name: Terminate EC2 Instances
         if: always()
         run: |
           aws ec2 terminate-instances --instance-ids ${{ env.INSTANCE_IDS }}
           aws ec2 wait instance-terminated --instance-ids ${{ env.INSTANCE_IDS }}
 
-      # Delete security group
       - name: Delete Security Group
         if: always()
         run: |
