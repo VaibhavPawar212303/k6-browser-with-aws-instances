@@ -78,7 +78,7 @@ jobs:
         run: |
           INSTANCE_IDS=$(aws ec2 run-instances \
             --image-id ${{ env.AMI_ID }} \
-            --count 5 \
+            --count 1 \
             --instance-type ${{ env.INSTANCE_TYPE }} \
             --security-group-ids ${{ env.SECURITY_GROUP }} \
             --subnet-id ${{ env.SUBNET_ID }} \
@@ -109,13 +109,11 @@ jobs:
               --query 'Reservations[0].Instances[0].PublicIpAddress' \
               --output text)
             echo "Connecting to instance: $INSTANCE_IP"
-
-            ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP <<EOC
+            ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP 
               sudo apt-get update -y
               sudo apt-get install -y k6 git
               git clone https://github.com/VaibhavPawar212303/k6-browser-with-aws-instances.git
               echo "K6 and repository setup completed on \$(hostname)"
-      EOC
           done
         env:
           AWS_SSH_PRIVATE_KEY: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
