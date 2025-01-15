@@ -12,7 +12,6 @@ jobs:
     env:
       REGION: us-east-1
       INSTANCE_TYPE: t2.micro
-      K6_SCRIPT: script.js
       TAG_NAME: k6-test-instance
 
     steps:
@@ -85,10 +84,6 @@ jobs:
             --subnet-id ${{ env.SUBNET_ID }} \
             --key-name vaibhav \
             --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ env.TAG_NAME }}}]" \
-            --user-data '#!/bin/bash
-              sudo apt-get update -y
-              sudo apt-get install -y k6 git
-              git clone https://github.com/VaibhavPawar212303/k6-browser-with-aws-instances.git' \
             --query 'Instances[*].InstanceId' --output text)
           if [[ -z "$INSTANCE_IDS" || "$INSTANCE_IDS" == "None" ]]; then
             echo "Failed to launch EC2 instances." >&2
@@ -96,13 +91,13 @@ jobs:
           fi
           echo "INSTANCE_IDS=${INSTANCE_IDS}" >> $GITHUB_ENV
 
-      - name: Wait for Instances to Complete Execution
+      - name: Wait for Instances to Complete Initialization
         run: |
           for id in ${{ env.INSTANCE_IDS }}; do
             aws ec2 wait instance-status-ok --instance-ids $id
           done
 
-      - name: List Installed Components in Each Instance
+      - name: Execute Commands via SSH
         run: |
           # Save the private key to a file
           echo "$AWS_SSH_PRIVATE_KEY" > private_key.pem
@@ -113,8 +108,13 @@ jobs:
               --instance-ids $id \
               --query 'Reservations[0].Instances[0].PublicIpAddress' \
               --output text)
-            ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP \
-            "ls -la && k6 version"
+            echo "Connecting to instance: $INSTANCE_IP"
+
+            ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP << 'EOF'
+              sudo apt-get update -y
+              sudo apt-get install -y k6 git
+              git clone https://github.com/VaibhavPawar212303/k6-browser-with-aws-instances.git
+              echo "K6 and repository setup completed on $(hostname)"
           done
         env:
           AWS_SSH_PRIVATE_KEY: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
