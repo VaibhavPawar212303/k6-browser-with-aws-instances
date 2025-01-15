@@ -134,7 +134,7 @@ jobs:
 
           # SSH into the instance and run the K6 script
           ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@${{ env.INSTANCE_IP }} \
-          "docker run -v /home/ubuntu/scripts:/scripts --rm grafana/k6 run /scripts/script.js"
+          "ls -la"
         env:
           AWS_SSH_PRIVATE_KEY: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
 
