@@ -114,7 +114,7 @@ jobs:
               --query 'Reservations[0].Instances[0].PublicIpAddress' \
               --output text)
             ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP \
-            "ls -la ~/k6-browser-with-aws-instances && k6 version"
+            "ls -la && k6 version"
           done
         env:
           AWS_SSH_PRIVATE_KEY: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
