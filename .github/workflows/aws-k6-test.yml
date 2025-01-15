@@ -16,111 +16,134 @@ jobs:
       TAG_NAME: k6-test-instance
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-    - name: Set up AWS CLI
-      uses: aws-actions/configure-aws-credentials@v3
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.REGION }}
+      - name: Set up AWS CLI
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.REGION }}
 
-    - name: Get Latest Ubuntu AMI
-      id: get_ami
-      run: |
-        AMI_ID=$(aws ec2 describe-images \
-          --owners 099720109477 \
-          --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*" \
-          --query 'Images | sort_by(@, &CreationDate)[-1].ImageId' \
-          --output text)
-        echo "AMI_ID=${AMI_ID}" >> $GITHUB_ENV
+      - name: Get Latest Ubuntu AMI
+        id: get_ami
+        run: |
+          AMI_ID=$(aws ec2 describe-images \
+            --owners 099720109477 \
+            --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*" \
+            --query 'Images | sort_by(@, &CreationDate)[-1].ImageId' \
+            --output text)
+          if [[ -z "$AMI_ID" || "$AMI_ID" == "None" ]]; then
+            echo "Failed to fetch the latest Ubuntu AMI." >&2
+            exit 1
+          fi
+          echo "AMI_ID=${AMI_ID}" >> $GITHUB_ENV
 
-    - name: Create Security Group
-      id: create_security_group
-      run: |
-        SG_ID=$(aws ec2 create-security-group \
-          --group-name "k6-test-sg" \
-          --description "Security group for K6 test" \
-          --vpc-id $(aws ec2 describe-vpcs --query 'Vpcs[0].VpcId' --output text) \
-          --query 'GroupId' \
-          --output text)
-        aws ec2 authorize-security-group-ingress \
-          --group-id ${SG_ID} \
-          --protocol tcp \
-          --port 22 \
-          --cidr 0.0.0.0/0
-        echo "SECURITY_GROUP=${SG_ID}" >> $GITHUB_ENV
+      - name: Create Security Group
+        id: create_security_group
+        run: |
+          SG_NAME="k6-test-sg"
+          EXISTING_SG_ID=$(aws ec2 describe-security-groups \
+            --filters "Name=group-name,Values=${SG_NAME}" \
+            --query "SecurityGroups[0].GroupId" --output text 2>/dev/null)
+          
+          if [[ "$EXISTING_SG_ID" == "None" || -z "$EXISTING_SG_ID" ]]; then
+            echo "Creating a new security group..."
+            SG_ID=$(aws ec2 create-security-group \
+              --group-name "$SG_NAME" \
+              --description "Security group for K6 test" \
+              --vpc-id $(aws ec2 describe-vpcs --query 'Vpcs[0].VpcId' --output text) \
+              --query 'GroupId' --output text)
+            aws ec2 authorize-security-group-ingress \
+              --group-id "$SG_ID" --protocol tcp --port 22 --cidr 0.0.0.0/0
+          else
+            SG_ID="$EXISTING_SG_ID"
+          fi
+          echo "SECURITY_GROUP=${SG_ID}" >> $GITHUB_ENV
 
-    - name: Get Default Subnet
-      id: get_subnet
-      run: |
-        SUBNET_ID=$(aws ec2 describe-subnets \
-          --filters "Name=default-for-az,Values=true" \
-          --query 'Subnets[0].SubnetId' \
-          --output text)
-        echo "SUBNET_ID=${SUBNET_ID}" >> $GITHUB_ENV
+      - name: Get Default Subnet
+        id: get_subnet
+        run: |
+          SUBNET_ID=$(aws ec2 describe-subnets \
+            --filters "Name=default-for-az,Values=true" \
+            --query 'Subnets[0].SubnetId' --output text)
+          if [[ -z "$SUBNET_ID" || "$SUBNET_ID" == "None" ]]; then
+            echo "Failed to fetch default subnet." >&2
+            exit 1
+          fi
+          echo "SUBNET_ID=${SUBNET_ID}" >> $GITHUB_ENV
 
-    - name: Prepare User Data
-      id: prepare_userdata
-      run: |
-        USER_DATA=$(cat << 'EOF'
-        #!/bin/bash
-        sudo apt update -y
-        sudo apt install -y docker.io
-        sudo systemctl start docker
-        mkdir -p /home/ubuntu/scripts
-        echo "console.log('Hello from K6!');" > /home/ubuntu/scripts/script.js
-        sudo docker run -v /home/ubuntu/scripts:/scripts --rm grafana/k6 run /scripts/script.js
-        EOF
-        )
-        echo "USER_DATA=$(echo "$USER_DATA" | base64 -w 0)" >> $GITHUB_ENV
+      - name: Prepare User Data
+        id: prepare_userdata
+        run: |
+          SCRIPT_PATH="./scripts/${{ env.K6_SCRIPT }}"
+          if [[ ! -f "$SCRIPT_PATH" ]]; then
+            echo "K6 script not found. Using default script."
+            echo "console.log('Default script executed');" > "$SCRIPT_PATH"
+          fi
+          USER_DATA=$(cat << 'EOF'
+          #!/bin/bash
+          sudo apt update -y
+          sudo apt install -y docker.io
+          sudo systemctl start docker
+          mkdir -p /home/ubuntu/scripts
+          echo "console.log('Hello from K6!');" > /home/ubuntu/scripts/script.js
+          sudo docker run -v /home/ubuntu/scripts:/scripts --rm grafana/k6 run /scripts/script.js
+          EOF
+          )
+          echo "USER_DATA=$(echo "$USER_DATA" | base64 -w 0)" >> $GITHUB_ENV
 
-    - name: Launch EC2 Instance
-      id: launch_ec2
-      run: |
-        INSTANCE_ID=$(aws ec2 run-instances \
-          --image-id ${{ env.AMI_ID }} \
-          --count 1 \
-          --instance-type ${{ env.INSTANCE_TYPE }} \
-          --security-group-ids ${{ env.SECURITY_GROUP }} \
-          --subnet-id ${{ env.SUBNET_ID }} \
-          --key-name vaibhav \  # Use the key pair name here
-          --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ env.TAG_NAME }}}]" \
-          --query 'Instances[0].InstanceId' \
-          --output text)
-        echo "INSTANCE_ID=${INSTANCE_ID}" >> $GITHUB_ENV
+      - name: Launch EC2 Instance
+        id: launch_ec2
+        run: |
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id ${{ env.AMI_ID }} \
+            --count 1 \
+            --instance-type ${{ env.INSTANCE_TYPE }} \
+            --security-group-ids ${{ env.SECURITY_GROUP }} \
+            --subnet-id ${{ env.SUBNET_ID }} \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ env.TAG_NAME }}}]" \
+            --user-data "$(echo ${{ env.USER_DATA }} | base64 --decode)" \
+            --query 'Instances[0].InstanceId' --output text)
+          if [[ -z "$INSTANCE_ID" || "$INSTANCE_ID" == "None" ]]; then
+            echo "Failed to launch EC2 instance." >&2
+            exit 1
+          fi
+          echo "INSTANCE_ID=${INSTANCE_ID}" >> $GITHUB_ENV
 
-    - name: Wait for Instance to be Running
-      run: |
-        aws ec2 wait instance-running --instance-ids ${{ env.INSTANCE_ID }}
+      - name: Wait for Instance to Complete Execution
+        run: |
+          aws ec2 wait instance-status-ok --instance-ids ${{ env.INSTANCE_ID }}
 
-    - name: Get EC2 Public IP
-      id: get_ip
-      run: |
-        INSTANCE_IP=$(aws ec2 describe-instances \
-          --instance-ids ${{ env.INSTANCE_ID }} \
-          --query 'Reservations[0].Instances[0].PublicIpAddress' \
-          --output text)
-        echo "INSTANCE_IP=${INSTANCE_IP}" >> $GITHUB_ENV
+      - name: Get EC2 Public IP
+        id: get_ip
+        run: |
+          INSTANCE_IP=$(aws ec2 describe-instances \
+            --instance-ids ${{ env.INSTANCE_ID }} \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
+          echo "INSTANCE_IP=${INSTANCE_IP}" >> $GITHUB_ENV
 
-    - name: Run K6 Script on EC2 Instance
-      run: |
-        # Save the private key to a file
-        echo "$AWS_SSH_PRIVATE_KEY" > private_key.pem
-        chmod 600 private_key.pem
+      - name: Run K6 Script on EC2 Instance
+        run: |
+          # Save the private key to a file
+          echo "$AWS_SSH_PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
 
-        # SSH into the instance and run the K6 script
-        ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@${{ env.INSTANCE_IP }} \
-        "docker run -v /home/ubuntu/scripts:/scripts --rm grafana/k6 run /scripts/script.js"
-      env:
-        AWS_SSH_PRIVATE_KEY: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
+          # SSH into the instance and run the K6 script
+          ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@${{ env.INSTANCE_IP }} \
+          "docker run -v /home/ubuntu/scripts:/scripts --rm grafana/k6 run /scripts/script.js"
+        env:
+          AWS_SSH_PRIVATE_KEY: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
 
-    - name: Terminate EC2 Instance
-      run: |
-        aws ec2 terminate-instances --instance-ids ${{ env.INSTANCE_ID }}
-        aws ec2 wait instance-terminated --instance-ids ${{ env.INSTANCE_ID }}
+      - name: Terminate EC2 Instance
+        if: always()
+        run: |
+          aws ec2 terminate-instances --instance-ids ${{ env.INSTANCE_ID }}
+          aws ec2 wait instance-terminated --instance-ids ${{ env.INSTANCE_ID }}
 
-    - name: Delete Security Group
-      run: |
-        aws ec2 delete-security-group --group-id ${{ env.SECURITY_GROUP }}
+      - name: Delete Security Group
+        if: always()
+        run: |
+          aws ec2 delete-security-group --group-id ${{ env.SECURITY_GROUP }}
