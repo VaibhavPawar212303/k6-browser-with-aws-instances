@@ -74,7 +74,7 @@ jobs:
           fi
           echo "SUBNET_ID=${SUBNET_ID}" >> $GITHUB_ENV
 
-      - name: Launch 5 EC2 Instances
+      - name: Launch EC2 Instances
         id: launch_ec2
         run: |
           INSTANCE_IDS=$(aws ec2 run-instances \
@@ -85,34 +85,36 @@ jobs:
             --subnet-id ${{ env.SUBNET_ID }} \
             --key-name vaibhav \
             --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ env.TAG_NAME }}}]" \
+            --user-data '#!/bin/bash
+              sudo apt-get update -y
+              sudo apt-get install -y k6 git
+              git clone https://github.com/VaibhavPawar212303/k6-browser-with-aws-instances.git' \
             --query 'Instances[*].InstanceId' --output text)
-          if [[ -z "$INSTANCE_IDS" ]]; then
+          if [[ -z "$INSTANCE_IDS" || "$INSTANCE_IDS" == "None" ]]; then
             echo "Failed to launch EC2 instances." >&2
             exit 1
           fi
           echo "INSTANCE_IDS=${INSTANCE_IDS}" >> $GITHUB_ENV
 
-      - name: Wait for Instances to Be Ready
+      - name: Wait for Instances to Complete Execution
         run: |
-          for INSTANCE_ID in ${{ env.INSTANCE_IDS }}; do
-            aws ec2 wait instance-status-ok --instance-ids $INSTANCE_ID
+          for id in ${{ env.INSTANCE_IDS }}; do
+            aws ec2 wait instance-status-ok --instance-ids $id
           done
 
-      - name: Get EC2 Public IPs
-        id: get_ips
+      - name: List Installed Components in Each Instance
         run: |
-          INSTANCE_IPS=$(aws ec2 describe-instances \
-            --instance-ids ${{ env.INSTANCE_IDS }} \
-            --query 'Reservations[*].Instances[*].PublicIpAddress' \
-            --output text)
-          echo "INSTANCE_IPS=${INSTANCE_IPS}" >> $GITHUB_ENV
-
-      - name: Run Commands on EC2 Instances
-        run: |
+          # Save the private key to a file
           echo "$AWS_SSH_PRIVATE_KEY" > private_key.pem
           chmod 600 private_key.pem
-          for INSTANCE_IP in ${{ env.INSTANCE_IPS }}; do
-            ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "ls -la"
+
+          for id in ${{ env.INSTANCE_IDS }}; do
+            INSTANCE_IP=$(aws ec2 describe-instances \
+              --instance-ids $id \
+              --query 'Reservations[0].Instances[0].PublicIpAddress' \
+              --output text)
+            ssh -i private_key.pem -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP \
+            "ls -la ~/k6-browser-with-aws-instances && k6 version"
           done
         env:
           AWS_SSH_PRIVATE_KEY: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
